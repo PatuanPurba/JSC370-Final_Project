@@ -10,7 +10,13 @@ import plotly.graph_objects as go
 
 # df_1 = "During Film Making"
 # df_2 = "Current Career"
-df_1 = pd.read_csv("data/person_movie_history.csv")
+from pathlib import Path
+import pandas as pd
+
+files = sorted(Path("data").glob("full_movie_history_*.csv"))
+df_1 = pd.concat([pd.read_csv(f) for f in files], ignore_index=True)
+
+
 df_2 = pd.read_csv("data/person.csv")
 df_2["career_span"] = df_2["last_yr"] - df_2["first_yr"] + 1
 
@@ -513,3 +519,4 @@ def make_detail_panel(movie_id):
 
 if __name__ == "__main__":
     app.run(debug=True)
+    server = app.server

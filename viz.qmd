@@ -1,0 +1,457 @@
+---
+title: "JSC370 Final Project Visualization"
+format:
+ html:
+    embed-resources: true
+execute:
+  echo: false
+  warning: false
+  message: false
+jupyter: jsc370_final-venv
+
+---
+
+```{python}
+import pandas as pd
+from pandas.api.types import is_numeric_dtype, is_string_dtype
+import numpy as np
+import matplotlib.pyplot as plt
+import plotly.express as px
+import matplotlib.dates as mdates
+from sklearn.preprocessing import MultiLabelBinarizer
+import matplotlib.cm as cm
+import matplotlib.colors as mcolors
+import seaborn as sns
+import os
+from sklearn.metrics import accuracy_score, precision_score, recall_score,mean_squared_error, r2_score, mean_absolute_error, f1_score, roc_auc_score
+from sklearn.linear_model import Ridge
+from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
+from sklearn.model_selection import GridSearchCV, RandomizedSearchCV, TimeSeriesSplit, train_test_split
+from sklearn.ensemble import RandomForestRegressor
+from xgboost import XGBRegressor
+```
+
+
+```{python}
+movies = pd.read_csv("data/processed/movies.csv")
+casting = pd.read_csv("data/processed/casting.csv")
+person = pd.read_csv("data/processed/person.csv")
+person_movie_history = pd.read_csv("data/processed/person_movie_history.csv")
+movies_enrich = pd.read_csv("data/processed/movies_enrich.csv")
+```
+
+
+```{python}
+import json
+import numpy as np
+import pandas as pd
+from pathlib import Path
+
+# ============================================================
+# 1. MODIFY THESE COLUMN NAMES
+# ============================================================
+
+# Required ID columns
+PID_COL = "pid"
+MOVIE_ID_COL = "Movie ID"
+
+# Optional label columns
+NAME_COL = "Name"          # change if your person name column is different
+JOB_COL = "Job"            # only likely exists in df_1
+TITLE_COL = "Title"        # optional, only if df_1 has movie title
+
+# Scatterplot 1: During Film Making
+# UNCERTAIN: replace these with your real df_1 columns
+DF1_X = "past_n_movies"
+DF1_Y = "past_avg_rating"
+
+# Scatterplot 2: Current Career
+# UNCERTAIN: replace these with your real df_2 columns
+DF2_X = "n_movies"
+DF2_Y = "wavg_rating"
+
+
+# ============================================================
+# 2. Clean data for JSON export
+# ============================================================
+
+def make_json_safe(df):
+    out = df.copy()
+
+    # Convert datetime columns to string
+    for col in out.columns:
+        if pd.api.types.is_datetime64_any_dtype(out[col]):
+            out[col] = out[col].astype(str)
+
+    # Replace NaN / inf with None so JavaScript can read it
+    out = out.replace([np.inf, -np.inf], np.nan)
+    out = out.where(pd.notna(out), None)
+
+    return out
+
+
+df1_safe = make_json_safe(df_1)
+df2_safe = make_json_safe(df_2)
+
+# Optional: keep only columns needed to reduce file size
+df1_cols = [
+    PID_COL, MOVIE_ID_COL, DF1_X, DF1_Y,
+    NAME_COL, JOB_COL
+]
+if TITLE_COL in df1_safe.columns:
+    df1_cols.append(TITLE_COL)
+
+df1_cols = [c for c in df1_cols if c in df1_safe.columns]
+
+df2_cols = [
+    PID_COL, DF2_X, DF2_Y,
+    NAME_COL
+]
+df2_cols = [c for c in df2_cols if c in df2_safe.columns]
+
+df1_records = df1_safe[df1_cols].to_dict(orient="records")
+df2_records = df2_safe[df2_cols].to_dict(orient="records")
+
+# Movie dropdown options
+movie_cols = [MOVIE_ID_COL]
+if TITLE_COL in df1_safe.columns:
+    movie_cols.append(TITLE_COL)
+
+movie_options = (
+    df1_safe[movie_cols]
+    .drop_duplicates(subset=[MOVIE_ID_COL])
+    .sort_values(MOVIE_ID_COL)
+    .to_dict(orient="records")
+)
+
+
+# ============================================================
+# 3. Create HTML file
+# ============================================================
+
+html = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Linked Scatterplots</title>
+    <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+
+    <style>
+        body {{
+            font-family: Arial, sans-serif;
+            margin: 24px;
+        }}
+
+        .controls {{
+            margin-bottom: 16px;
+        }}
+
+        .plot-container {{
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 24px;
+        }}
+
+        .plot-box {{
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            padding: 12px;
+        }}
+
+        select, button {{
+            font-size: 14px;
+            padding: 6px 10px;
+            margin-right: 8px;
+        }}
+
+        #selected-info {{
+            margin-top: 10px;
+            font-weight: bold;
+        }}
+
+        @media (max-width: 900px) {{
+            .plot-container {{
+                grid-template-columns: 1fr;
+            }}
+        }}
+    </style>
+</head>
+
+<body>
+
+<h2>Linked Person Scatterplots</h2>
+
+<div class="controls">
+    <label for="movie-select">Select movie:</label>
+    <select id="movie-select"></select>
+    <button id="reset-highlight">Reset highlight</button>
+    <div id="selected-info">Selected person: none</div>
+</div>
+
+<div class="plot-container">
+    <div class="plot-box">
+        <h3>During Film Making</h3>
+        <div id="scatter1"></div>
+    </div>
+
+    <div class="plot-box">
+        <h3>Current Career</h3>
+        <div id="scatter2"></div>
+    </div>
+</div>
+
+<script>
+const df1 = {json.dumps(df1_records, allow_nan=False)};
+const df2 = {json.dumps(df2_records, allow_nan=False)};
+const movieOptions = {json.dumps(movie_options, allow_nan=False)};
+
+const PID_COL = {json.dumps(PID_COL)};
+const MOVIE_ID_COL = {json.dumps(MOVIE_ID_COL)};
+const NAME_COL = {json.dumps(NAME_COL)};
+const JOB_COL = {json.dumps(JOB_COL)};
+const TITLE_COL = {json.dumps(TITLE_COL)};
+
+const DF1_X = {json.dumps(DF1_X)};
+const DF1_Y = {json.dumps(DF1_Y)};
+const DF2_X = {json.dumps(DF2_X)};
+const DF2_Y = {json.dumps(DF2_Y)};
+
+let currentRows1 = [];
+let currentRows2 = [];
+let selectedPid = null;
+
+
+// ============================================================
+// Dropdown setup
+// ============================================================
+
+const movieSelect = document.getElementById("movie-select");
+
+movieOptions.forEach(row => {{
+    const option = document.createElement("option");
+    option.value = row[MOVIE_ID_COL];
+
+    if (row[TITLE_COL] !== undefined && row[TITLE_COL] !== null) {{
+        option.textContent = `${{row[TITLE_COL]}} (${{row[MOVIE_ID_COL]}})`;
+    }} else {{
+        option.textContent = row[MOVIE_ID_COL];
+    }}
+
+    movieSelect.appendChild(option);
+}});
+
+
+// ============================================================
+// Helper functions
+// ============================================================
+
+function safeValue(row, col) {{
+    return row[col] === undefined || row[col] === null ? "" : row[col];
+}}
+
+function makeCustomData(row, movieId=null) {{
+    // This is the object you receive when a point is clicked.
+    // You can add more fields here.
+    return {{
+        pid: row[PID_COL],
+        movie_id: movieId,
+        name: safeValue(row, NAME_COL),
+        job: safeValue(row, JOB_COL),
+        x_value: null,
+        y_value: null
+    }};
+}}
+
+function makeHoverText(row, xCol, yCol, movieId=null) {{
+    const name = safeValue(row, NAME_COL);
+    const job = safeValue(row, JOB_COL);
+
+    return `
+        <b>${{name}}</b><br>
+        pid: ${{safeValue(row, PID_COL)}}<br>
+        movie id: ${{movieId === null ? "" : movieId}}<br>
+        job: ${{job}}<br>
+        ${{xCol}}: ${{safeValue(row, xCol)}}<br>
+        ${{yCol}}: ${{safeValue(row, yCol)}}
+    `;
+}}
+
+function makeMarkerArrays(rows) {{
+    const colors = rows.map(row => {{
+        return String(row[PID_COL]) === String(selectedPid)
+            ? "red"
+            : "rgba(70, 120, 180, 0.65)";
+    }});
+
+    const sizes = rows.map(row => {{
+        return String(row[PID_COL]) === String(selectedPid)
+            ? 16
+            : 8;
+    }});
+
+    const lineWidths = rows.map(row => {{
+        return String(row[PID_COL]) === String(selectedPid)
+            ? 3
+            : 0.5;
+    }});
+
+    return {{ colors, sizes, lineWidths }};
+}}
+
+function makeTrace(rows, xCol, yCol, movieId=null) {{
+    const markerArrays = makeMarkerArrays(rows);
+
+    const customdata = rows.map(row => {{
+        const cd = makeCustomData(row, movieId);
+        cd.x_value = row[xCol];
+        cd.y_value = row[yCol];
+        return cd;
+    }});
+
+    return {{
+        x: rows.map(row => row[xCol]),
+        y: rows.map(row => row[yCol]),
+        mode: "markers",
+        type: "scatter",
+        text: rows.map(row => safeValue(row, NAME_COL)),
+        customdata: customdata,
+        hovertext: rows.map(row => makeHoverText(row, xCol, yCol, movieId)),
+        hoverinfo: "text",
+        marker: {{
+            color: markerArrays.colors,
+            size: markerArrays.sizes,
+            line: {{
+                color: "black",
+                width: markerArrays.lineWidths
+            }}
+        }}
+    }};
+}}
+
+function getClickedPid(eventData) {{
+    if (!eventData || !eventData.points || eventData.points.length === 0) {{
+        return null;
+    }}
+
+    const custom = eventData.points[0].customdata;
+    return custom.pid;
+}}
+
+function updateSelectedInfo() {{
+    const info = document.getElementById("selected-info");
+
+    if (selectedPid === null) {{
+        info.textContent = "Selected person: none";
+        return;
+    }}
+
+    const row =
+        currentRows1.find(r => String(r[PID_COL]) === String(selectedPid)) ||
+        currentRows2.find(r => String(r[PID_COL]) === String(selectedPid));
+
+    const name = row ? safeValue(row, NAME_COL) : "";
+    info.textContent = `Selected person: ${{name}} | pid: ${{selectedPid}}`;
+}}
+
+function updateHighlightOnly() {{
+    const marker1 = makeMarkerArrays(currentRows1);
+    const marker2 = makeMarkerArrays(currentRows2);
+
+    Plotly.restyle("scatter1", {{
+        "marker.color": [marker1.colors],
+        "marker.size": [marker1.sizes],
+        "marker.line.width": [marker1.lineWidths]
+    }});
+
+    Plotly.restyle("scatter2", {{
+        "marker.color": [marker2.colors],
+        "marker.size": [marker2.sizes],
+        "marker.line.width": [marker2.lineWidths]
+    }});
+
+    updateSelectedInfo();
+}}
+
+
+// ============================================================
+// Main rendering function
+// ============================================================
+
+function renderForMovie(movieId) {{
+    selectedPid = null;
+
+    currentRows1 = df1.filter(row => String(row[MOVIE_ID_COL]) === String(movieId));
+
+    const moviePids = new Set(
+        currentRows1.map(row => String(row[PID_COL]))
+    );
+
+    // df_2 is filtered to the people involved in the selected movie.
+    // This assumes df_2 has one row per person or career-level person records.
+    currentRows2 = df2.filter(row => moviePids.has(String(row[PID_COL])));
+
+    const trace1 = makeTrace(currentRows1, DF1_X, DF1_Y, movieId);
+    const trace2 = makeTrace(currentRows2, DF2_X, DF2_Y, movieId);
+
+    const layout1 = {{
+        xaxis: {{ title: DF1_X }},
+        yaxis: {{ title: DF1_Y }},
+        margin: {{ t: 20, r: 20, b: 60, l: 70 }},
+        height: 500
+    }};
+
+    const layout2 = {{
+        xaxis: {{ title: DF2_X }},
+        yaxis: {{ title: DF2_Y }},
+        margin: {{ t: 20, r: 20, b: 60, l: 70 }},
+        height: 500
+    }};
+
+    Plotly.react("scatter1", [trace1], layout1, {{ responsive: true }});
+    Plotly.react("scatter2", [trace2], layout2, {{ responsive: true }});
+
+    updateSelectedInfo();
+}
+
+
+// ============================================================
+// Events
+// ============================================================
+
+document.getElementById("scatter1").on("plotly_click", function(eventData) {{
+    selectedPid = getClickedPid(eventData);
+    updateHighlightOnly();
+}});
+
+document.getElementById("scatter2").on("plotly_click", function(eventData) {{
+    selectedPid = getClickedPid(eventData);
+    updateHighlightOnly();
+}});
+
+movieSelect.addEventListener("change", function() {{
+    renderForMovie(movieSelect.value);
+}});
+
+document.getElementById("reset-highlight").addEventListener("click", function() {{
+    selectedPid = null;
+    updateHighlightOnly();
+}});
+
+
+// Initial render
+if (movieOptions.length > 0) {{
+    movieSelect.value = movieOptions[0][MOVIE_ID_COL];
+    renderForMovie(movieSelect.value);
+}}
+</script>
+
+</body>
+</html>
+"""
+
+Path("linked_scatterplots.html").write_text(html, encoding="utf-8")
+
+print("Saved: linked_scatterplots.html")
+
+```

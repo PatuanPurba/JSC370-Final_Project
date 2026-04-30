@@ -1,0 +1,1138 @@
+---
+title: "JSC370 Final Project Data Report"
+format:
+ html:
+    embed-resources: true
+execute:
+  echo: false
+  warning: false
+  message: false
+  fig-width: 15
+  fig-height: 10
+jupyter: jsc370_final-venv
+
+  
+
+---
+
+```{python}
+import pandas as pd
+from pandas.api.types import is_numeric_dtype, is_string_dtype
+import numpy as np
+import matplotlib.pyplot as plt
+import plotly.express as px
+import matplotlib.dates as mdates
+from sklearn.preprocessing import MultiLabelBinarizer
+import matplotlib.cm as cm
+import matplotlib.colors as mcolors
+import seaborn as sns
+import os
+from sklearn.metrics import accuracy_score, precision_score, recall_score,mean_squared_error, r2_score, mean_absolute_error, f1_score, roc_auc_score
+from sklearn.linear_model import Ridge
+from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
+from sklearn.model_selection import GridSearchCV, RandomizedSearchCV, TimeSeriesSplit, train_test_split
+from sklearn.ensemble import RandomForestRegressor
+from xgboost import XGBRegressor
+```
+
+```{python}
+import warnings
+from scipy.linalg import LinAlgWarning
+
+warnings.filterwarnings("ignore", category=LinAlgWarning)
+```
+
+```{python}
+movies = pd.read_csv("data/processed/movies.csv")
+casting = pd.read_csv("data/processed/casting.csv")
+person = pd.read_csv("data/processed/person.csv")
+person_movie_history = pd.read_csv("data/processed/person_movie_history.csv")
+movies_enrich = pd.read_csv("data/processed/movies_enrich.csv")
+```
+
+# Background
+## Motivation
+Movie analysis is a very interesting topic since not only can many factors be analysed, whether measurable directly or not. Some observable factors, such as production and distribution costs, theme and genre choice, and audience response factors, make the movie’s performance hard to predict. Further, there are also “invisible” factors that may affect a movie’s success, such as the plot storyline and the production team’s experience. These various factors make the movie’s performance often difficult to predict. 
+
+This project focuses on observable features derived from movie metadata and team composition. These include movie-level characteristics such as genre, runtime, budget, and popularity, as well as team-related features such as cast size, crew size, and historical performance indicators of individuals involved in the movie (e.g., previous ratings and number of successful movies). By aggregating these features, we aim to approximate some of the “hidden” factors through measurable proxies.
+
+In addition to cross-sectional relationships, movie characteristics and their association with performance may also change over time due to various reasons, such as the introduction of CGI and improvements in digital production, as well as shifts in distribution channels and global audience access. However, incorporating temporal effects directly into predictive models can be challenging, particularly when the nature of these shifts is unclear or difficult to encode through simple variables or interactions. For this reason, this project shifts the main reliance of temporal analysis from predictive analysis to data exploration and plotting
+
+Despite the main analysis on graph analysis, this project still tries to encode “Big” events that supposedly change the underlying dataset structure by using a time indicator. Instead, temporal patterns are more explored through data visualization, examining how movie characteristics such as genre distribution, runtime, and team composition evolve between 2000 and 2025. Furthermore, plots are used to assess whether these shifts correspond to changes in movie performance. This approach allows for a clearer interpretation of temporal trends without introducing additional complexity into the modeling framework.
+
+## Research Questions
+
+- How strongly are movie characteristics and cast/crew statistics associated with movie performance 
+
+- Is there any temporal shift in the movie’s characteristics, such as genre, length, and team size, between 2000 and 2025
+
+- If there are any, how does the temporal shift affect the relationship between the movie’s information, including the team’s statistics, and the movie’s performance
+
+# Methods
+
+
+```{python}
+## Data Preparation
+
+df = movies_enrich.copy()
+df["Release Date"] = pd.to_datetime(df["Release Date"], errors="coerce")
+df = df.sort_values("Release Date").reset_index(drop=True)
+df["Quarter"] = df["Release Date"].dt.to_period("Q").dt.to_timestamp()
+df["Budget (USD)"] = df["Budget (USD)"].replace(np.nan, 0)
+df_encoded = pd.get_dummies(
+    df,
+    columns=["Language"],
+    drop_first=False,
+    dtype=int
+)
+df = df_encoded.copy()
+
+df.drop(columns=["Release Date"], inplace=True)
+
+
+features = [
+    "Length (min)", "Budget (USD)", "Cast Size", "Crew Size",
+
+    "has_cast", "top_cast_pop", "top_cast_career_span",
+    "top5_cast_pop", "top5_cast_wavg_mrating", "top5_cast_avg_mpop", "top5_cast_nblockbuster", "top5_cast_nprofit", "top5_cast_career_span", "n_experienced_cast",
+
+    "has_crew", "top5_crew_wavg_mrating", "top5_crew_avg_mpop", "top5_crew_nblockbuster", "top5_crew_nprofit", "n_experienced_crew",
+
+    "has_director", "director_nmovies", "director_pop", "director_wavg_mrating", "director_avg_mpop", "director_recent_mpop", "director_nblockbuster", "director_nprofit", "director_career_span"
+]
+
+genre_features = movies_enrich.columns[movies_enrich.columns.str.startswith("genre_")].tolist()
+
+Language_features = movies_enrich.columns[movies_enrich.columns.str.startswith("Language_")].tolist()
+
+Time_features = movies_enrich.columns[movies_enrich.columns.str.startswith("Time_")].tolist()
+
+features = features + genre_features + Language_features + Time_features
+
+target_1 = "Rating"
+target_2 = "Revenue (USD)"
+
+df = df.dropna(subset=features + [target_2])
+df["Revenue (USD)"] = np.log(df["Revenue (USD)"])
+
+X = df[features]
+y1 = df[target_1]   # or Rating / Revenue / Profit
+y2 = df[target_2]
+
+X_train, X_test, y1_train, y1_test, y2_train, y2_test = train_test_split(X, y1, y2, test_size=0.2, random_state=42, shuffle=False)
+```
+
+
+
+
+```{python}
+## Summary Function Results
+
+## Continous:
+def verbose_results(results_df):
+    summary = results_df[
+    [
+        "params",
+        "mean_test_r2",
+        "mean_test_neg_rmse",
+        "mean_test_neg_mae",
+        "rank_test_neg_rmse"
+    ]].copy()
+
+    summary["mean_test_rmse"] = -summary["mean_test_neg_rmse"]
+    summary["mean_test_mae"] = -summary["mean_test_neg_mae"]
+
+    summary = summary.sort_values("rank_test_neg_rmse")
+    summary = summary.rename(columns={
+        "params": "Parameters",
+        "mean_test_rmse": "Mean RMSE",
+        "mean_test_r2": "Mean R2",
+        "mean_test_mae": "Mean MAE",
+        "rank_test_neg_rmse": "Rank RMSE"
+    })
+    
+
+    summary = summary[[
+        "Parameters",
+        "Mean R2",
+        "Mean MAE",
+        "Mean RMSE",
+        "Rank RMSE"
+    ]]
+
+    display(summary.head())
+
+
+def build_result_dict(results_df_1, results_df_2, model_name):
+    best_1 = results_df_1.loc[results_df_1["rank_test_neg_rmse"] == 1].iloc[0]
+    best_2 = results_df_2.loc[results_df_2["rank_test_neg_rmse"] == 1].iloc[0]
+
+    return {
+        "Best R2 (Rating)": best_1["mean_test_r2"],
+        "Best MAE (Rating)": -best_1["mean_test_neg_mae"],
+        "Best RMSE (Rating)": -best_1["mean_test_neg_rmse"],
+        "Best R2 (log Revenue)": best_2["mean_test_r2"],
+        "Best MAE (log Revenue)": -best_2["mean_test_neg_mae"],
+        "Best RMSE (log Revenue)": -best_2["mean_test_neg_rmse"]
+    }
+
+
+```
+
+```{python}
+## Model Building
+# List to store best model training statistics for each model
+results_cv = []
+```
+
+
+```{python}
+#| include: false
+### Ridge Selection
+# Ridge Regression with Grid Search
+
+ridge_grid = GridSearchCV(
+    estimator=Ridge(),
+    param_grid={"alpha": [0.01, 0.1, 1, 10, 100]},
+    cv=TimeSeriesSplit(n_splits=5),
+    scoring={
+        "r2": "r2",
+        "neg_rmse": "neg_root_mean_squared_error",
+        "neg_mae": "neg_mean_absolute_error"
+    },
+    refit="neg_rmse",
+    return_train_score=True,
+    n_jobs=-1
+)
+
+ridge_grid.fit(X_train, y1_train)
+ridge_best_1 = ridge_grid.best_estimator_
+ridge_results_1 = pd.DataFrame(ridge_grid.cv_results_)
+
+print("Ridge Regression for Rating Prediction:")
+verbose_results(ridge_results_1)
+
+
+ridge_grid.fit(X_train, y2_train)
+ridge_best_2 = ridge_grid.best_estimator_
+ridge_results_2 = pd.DataFrame(ridge_grid.cv_results_)
+
+print("Ridge Regression for Revenue Prediction:")
+verbose_results(ridge_results_2)
+
+results_cv.append(build_result_dict(ridge_results_1, ridge_results_2, "Ridge"))
+```
+
+
+
+
+```{python}
+#| include: false
+### Decision Tree Model Selection
+# Decision Tree with Grid Search and Cost Complexity Pruning
+
+param_grid = {
+    "max_depth": [3, 5, 9],
+    "min_samples_leaf": [1, 5, 20],
+    "max_features": ["sqrt", "log2", 0.5, 1],
+    "ccp_alpha": []
+}
+
+full_tree = DecisionTreeRegressor(random_state=42)
+path_r = full_tree.cost_complexity_pruning_path(X_train, y1_train)
+
+ccp_alphas = path_r.ccp_alphas
+ccp_alphas = ccp_alphas[:-1]
+
+# Keep 0 as baseline: no pruning
+ccp_alphas = ccp_alphas[ccp_alphas > 0]
+
+log_alphas_r = np.logspace(
+    np.log10(ccp_alphas[0]), 
+    np.log10(ccp_alphas[-1]),
+    num=6
+)
+# Make a Grid Search of Tree
+param_grid["ccp_alpha"] = log_alphas_r
+
+tree_grid = GridSearchCV(
+    estimator=DecisionTreeRegressor(random_state=42),
+    param_grid=param_grid,
+    cv=TimeSeriesSplit(n_splits=5),
+    scoring={
+        "r2": "r2",
+        "neg_rmse": "neg_root_mean_squared_error",
+        "neg_mae": "neg_mean_absolute_error"
+    },
+    refit="neg_rmse",
+    return_train_score=True,
+    n_jobs=-1
+)
+
+tree_grid.fit(X_train, y1_train)
+tree_best_1 = tree_grid.best_estimator_
+tree_results_1 = pd.DataFrame(tree_grid.cv_results_)
+print("Decision Tree for Rating Prediction:")
+verbose_results(tree_results_1)
+
+# Log Revenue
+
+full_tree = DecisionTreeRegressor(random_state=42)
+path_r = full_tree.cost_complexity_pruning_path(X_train, y2_train)
+
+ccp_alphas = path_r.ccp_alphas
+ccp_alphas = ccp_alphas[:-1]
+
+# Keep 0 as baseline: no pruning
+ccp_alphas = ccp_alphas[ccp_alphas > 0]
+
+log_alphas_r = np.logspace(
+    np.log10(ccp_alphas[0]), 
+    np.log10(ccp_alphas[-1]),
+    num=6
+)
+# Make a Grid Search of Tree
+param_grid["ccp_alpha"] = log_alphas_r
+
+tree_grid = GridSearchCV(
+    estimator=DecisionTreeRegressor(random_state=42),
+    param_grid=param_grid,
+    cv=TimeSeriesSplit(n_splits=5),
+    scoring={
+        "r2": "r2",
+        "neg_rmse": "neg_root_mean_squared_error",
+        "neg_mae": "neg_mean_absolute_error"
+    },
+    refit="neg_rmse",
+    return_train_score=True,
+    n_jobs=-1
+)
+
+
+tree_grid.fit(X_train, y2_train)
+tree_best_2 = tree_grid.best_estimator_
+tree_results_2 = pd.DataFrame(tree_grid.cv_results_)
+print("Decision Tree for Revenue Prediction:")
+verbose_results(tree_results_2)
+
+results_cv.append(build_result_dict(tree_results_1, tree_results_2, "Decision Tree"))
+```
+
+
+
+
+```{python}
+#| include: false
+
+# Random Forest with Grid Search
+### Random Forest Model Selection
+rf = RandomForestRegressor(random_state=42)
+
+param_grid = {
+    "n_estimators": [100, 200],
+    "max_depth": [5, 10, None],
+    "min_samples_leaf": [1, 5, 10],
+    "max_features": ["sqrt", "log2"]
+}
+
+rf_grid = GridSearchCV(
+    estimator=rf,
+    param_grid=param_grid,
+    cv=TimeSeriesSplit(n_splits=5),
+    scoring={
+        "r2": "r2",
+        "neg_rmse": "neg_root_mean_squared_error",
+        "neg_mae": "neg_mean_absolute_error"
+    },
+    refit="neg_rmse",
+    return_train_score=True,
+    n_jobs=-1
+)
+
+rf_grid.fit(X_train, y1_train)
+rf_results_1 = pd.DataFrame(rf_grid.cv_results_)
+rf_best_1 = rf_grid.best_estimator_
+print("Random Forest for Rating Prediction:")
+verbose_results(rf_results_1)
+
+
+rf_grid.fit(X_train, y2_train)
+rf_best_2 = rf_grid.best_estimator_
+rf_results_2 = pd.DataFrame(rf_grid.cv_results_)
+# print("Random Forest for Revenue Prediction:")
+verbose_results(rf_results_2)
+
+results_cv.append(build_result_dict(rf_results_1, rf_results_2, "Random Forest"))
+```
+
+
+
+
+```{python}
+#| include: false
+
+### XGBoost Model Selection
+
+param_dist = {
+    'max_depth':     [4, 6, 8],
+    'learning_rate': [0.05, 0.1, 0.5],
+    'reg_lambda':    [0.1, 1, 10],
+    'reg_alpha':     [0, 0.1, 1],
+}
+
+xgb_rs = XGBRegressor(
+    n_estimators=100,  # hint: choose a fixed boosting-round budget for each sampled config
+    random_state=42,
+    eval_metric="rmse",
+    n_jobs=-1
+)
+
+xgb_grid = GridSearchCV(
+    estimator=xgb_rs,
+    param_grid=param_dist,  # hint: number of random parameter samples to evaluate
+    cv=TimeSeriesSplit(n_splits=5),  # hint: number of cross-validation folds
+    scoring={
+        "r2": "r2",
+        "neg_rmse": "neg_root_mean_squared_error",
+        "neg_mae": "neg_mean_absolute_error"
+    },
+    refit="neg_rmse",
+    n_jobs=-1,
+    verbose=1
+)
+
+xgb_grid.fit(X_train, y1_train)
+xgb_best_1 = xgb_grid.best_estimator_
+xgb_results_1 = pd.DataFrame(xgb_grid.cv_results_)
+# print("XGBoost for Rating Prediction:")
+# verbose_results(xgb_results_1)
+
+xgb_grid.fit(X_train, y2_train)
+xgb_best_2 = xgb_grid.best_estimator_
+xgb_results_2 = pd.DataFrame(xgb_grid.cv_results_)
+# print("XGBoost for Revenue Prediction:")
+# verbose_results(xgb_results_2)
+
+results_cv.append(build_result_dict(xgb_results_1, xgb_results_2, "XGBoost"))
+```
+
+# Results
+## Prediction Analysis
+### Model Comparison and Selection
+```{python}
+def sci_fmt(x):
+    if pd.isna(x):
+        return ""
+    exponent = int(np.floor(np.log10(abs(x)))) if x != 0 else 0
+    mantissa = x / (10 ** exponent)
+    return f"{mantissa:.2f} × 10<sup>{exponent}</sup>"
+```
+
+
+```{python}
+#| label: tbl-model-training-result
+#| tbl-cap: "5-Fold Chronological CV performance of models for rating and log-revenue prediction"
+#| echo: false
+#| warning: false
+#| message: false
+
+model_names = ["Ridge", "Decision Tree", "Random Forest", "XGBoost"]
+results_df = pd.DataFrame(results_cv, index=model_names)
+styled_result_table = (results_df.style
+    .highlight_max(axis=0, subset=["Best R2 (Rating)", "Best R2 (log Revenue)"], color="yellow")
+    .highlight_min(axis=0, subset=["Best MAE (Rating)", "Best RMSE (Rating)", "Best MAE (log Revenue)", "Best RMSE (log Revenue)"], color="yellow")
+    .set_table_styles([
+        {
+            "selector": "caption",
+            "props": [
+                ("caption-side", "bottom"),
+                ("text-align", "center"),
+                ("font-size", "0.9em"),
+                ("margin-top", "8px")
+            ]
+        }
+    ])
+).format({
+    "Best R2 (Rating)": "{:.3f}",
+    "Best MAE (Rating)": "{:.3f}",
+    "Best RMSE (Rating)": "{:.3f}",
+    "Best R2 (log Revenue)": "{:.3f}",
+    "Best MAE (log Revenue)": "{:.3f}",
+    "Best RMSE (log Revenue)": "{:.3f}",
+})
+styled_result_table
+
+```
+
+Table 1 compares the predictive performance of Ridge, Decision Tree, Random Forest, and XGBoost models on rating and log revenue outcomes based on validation results during training. XGBoost achieved the best performance across all evaluation metrics, although the improvement over Random Forest was relatively modest, especially for rating prediction. Therefore, XGBoost was selected as the final model for feature importance analysis.
+
+### Feature Importance Analysis
+
+Getting the best model, now we want to try analyze deeper what are the strong covariates for each outcomes and compare whether it differs significantly. Further, we also want to see whether our encoding on Team Statistics can have any prediction power in the model. 
+
+#### Rating
+```{python}
+#| label: fig-feature-importance-rating
+#| fig-cap: "Feature Importance of Rating Prediction Model"
+#| fig-align: center
+#| fig-width: 9
+#| fig-height: 7
+#| out-width: "100%"
+#| echo: false
+#| warning: false
+#| message: false
+
+
+model = xgb_best_1
+X_used = X_train       
+top_n = 10
+plot_title = "Top Feature Importance for Movie Rating Prediction"
+
+# ============================================================
+# Helper: get feature names
+# ============================================================
+
+def get_feature_names(X_used, model):
+    """
+    Best case:
+    - X_used is a pandas DataFrame, so columns are available.
+
+    Uncertain case:
+    - If you trained using NumPy array after preprocessing,
+      the feature names may become f0, f1, f2, ...
+    """
+    if hasattr(X_used, "columns"):
+        return np.array(X_used.columns)
+
+    if hasattr(model, "feature_names_in_"):
+        return np.array(model.feature_names_in_)
+
+    # fallback if feature names are unavailable
+    return np.array([f"feature_{i}" for i in range(model.n_features_in_)])
+
+
+# ============================================================
+# Helper: extract feature importance
+# ============================================================
+
+def extract_feature_importance(model, X_used, importance_type="gain"):
+    """
+    Works for:
+    - RandomForestRegressor / RandomForestClassifier
+    - XGBRegressor / XGBClassifier
+
+    For XGBoost, default importance_type = "gain",
+    which is usually more interpretable than "weight".
+    """
+    fitted_model = model
+
+    booster = fitted_model.get_booster()
+    importance_dict = booster.get_score(importance_type=importance_type)
+
+    feature_names = X_used.columns
+
+    importance_df = (
+        pd.DataFrame({
+            "feature": list(importance_dict.keys()),
+            "importance": list(importance_dict.values())
+        })
+        .sort_values("importance", ascending=False)
+        .reset_index(drop=True)
+    )
+
+    return importance_df
+
+
+# ============================================================
+# Extract importance
+# ============================================================
+
+importance_df = extract_feature_importance(
+    model=model,
+    X_used=X_used,
+    importance_type="gain"   # XGBoost only; ignored for Random Forest
+)
+
+importance_top = importance_df.head(top_n).sort_values("importance")
+
+importance_top["feature"] =  importance_top["feature"].replace({
+    "top5_crew_wavg_mrating": "Top 5 Crew Weighted Avg Movie Rating",
+    "n_experienced_cast": "Number of Experienced Cast Members",
+    "top5_cast_wavg_mrating": "Top 5 Cast Weighted Avg Movie Rating",
+    "director_wavg_mrating": "Director Weighted Avg Movie Rating",
+    "top5_crew_avg_mpop": "Top 5 Crew Average Movie Popularity",
+
+    "genre_Animation": "Genre Animation",
+    "genre_Drama": "Genre Drama",
+    "genre_Comedy": "Genre Comedy"
+})
+
+
+# PLOTTING
+
+fig, ax = plt.subplots(figsize=(8, 5.5))
+
+ax.barh(
+    importance_top["feature"],
+    importance_top["importance"]
+)
+
+ax.set_title(plot_title, fontsize=14, pad=12)
+ax.set_xlabel("Feature importance", fontsize=11)
+ax.set_ylabel("Feature", fontsize=11)
+
+ax.tick_params(axis="both", labelsize=10)
+
+# Remove unnecessary borders
+ax.spines["top"].set_visible(False)
+ax.spines["right"].set_visible(False)
+
+# Add light vertical grid
+ax.grid(axis="x", alpha=0.25)
+ax.set_axisbelow(True)
+
+plt.tight_layout()
+
+plt.show()
+
+```
+
+
+#### Log Revenue 
+```{python}
+#| label: fig-feature-importance-log-revenue
+#| fig-cap: "Feature Importance of Log Revenue Prediction Model"
+#| fig-align: center
+#| fig-width: 9
+#| fig-height: 7
+#| out-width: "100%"
+#| echo: false
+#| warning: false
+#| message: false
+
+model = xgb_best_2
+X_used = X_train       
+top_n = 10
+plot_title = "Top Feature Importance for Movie Log Revenue Prediction" 
+
+importance_df = extract_feature_importance(
+    model=model,
+    X_used=X_used,
+    importance_type="gain"  
+)
+
+
+importance_top = importance_df.head(top_n).sort_values("importance")
+
+importance_top["feature"] =  importance_top["feature"].replace({
+    "top5_crew_wavg_mrating": "Top 5 Crew Weighted Avg Movie Rating",
+    "top5_crew_nblockbuster": "Top 5 Crew No. Blockbuster Movies",
+    "director_nprofit": "Director No. Profit Movies",
+
+    "genre_Animation": "Genre Animation",
+    "genre_Comedy": "Genre Comedy",
+    "genre_Fantasy": "Genre Fantasy",
+    "genre_Family": "Genre Family",
+    "genre_Action": "Genre Action"
+})
+
+fig, ax = plt.subplots(figsize=(8, 5.5))
+
+ax.barh(
+    importance_top["feature"],
+    importance_top["importance"]
+)
+
+ax.set_title(plot_title, fontsize=14, pad=12)
+ax.set_xlabel("Feature importance", fontsize=11)
+ax.set_ylabel("Feature", fontsize=11)
+
+ax.tick_params(axis="both", labelsize=10)
+
+# Remove unnecessary borders
+ax.spines["top"].set_visible(False)
+ax.spines["right"].set_visible(False)
+
+# Add light vertical grid
+ax.grid(axis="x", alpha=0.25)
+ax.set_axisbelow(True)
+
+plt.tight_layout()
+
+plt.show()
+
+```
+
+Based on the graphs, we see a clear difference of the strong covariates between Rating and Log Revenue. For Rating, most of the important features comes from Cast and Crew quality-history variables, while most of the important features on log Revenue comes from the Metadata information. Putting aside the huge dominating by Budget, most of the important predictors is the genre of the film, especially Animation. This indicates that audience evaluation appears more connected to creative-team track record, whereas commercial performance is more strongly associated with production investment and genre marketability.
+
+
+### Ablation Test
+```{python}
+# Splitting All the predictors into 2 Categories, Metadata Information and the Movie's Team Statistics
+
+metadata_cols = [
+    "Length (min)",
+    "Budget (USD)",
+
+    "genre_Action",
+    "genre_Adventure",
+    "genre_Animation",
+    "genre_Comedy",
+    "genre_Crime",
+    "genre_Documentary",
+    "genre_Drama",
+    "genre_Family",
+    "genre_Fantasy",
+    "genre_History",
+    "genre_Horror",
+    "genre_Music",
+    "genre_Mystery",
+    "genre_Romance",
+    "genre_Science Fiction",
+    "genre_TV Movie",
+    "genre_Thriller",
+    "genre_War",
+    "genre_Western",
+
+    "Time_Post Digital",
+    "Time_Pre-Covid",
+    "Time_Post Netflix Expansion",
+]
+
+
+team_cols = [
+    "Cast Size",
+    "Crew Size",
+
+    "has_cast",
+    "top_cast_pop",
+    "top_cast_career_span",
+    "top5_cast_wavg_mrating",
+    "top5_cast_avg_mpop",
+    "top5_cast_nblockbuster",
+    "top5_cast_nprofit",
+    "top5_cast_career_span",
+    "n_experienced_cast",
+
+    "has_crew",
+    "top5_crew_avg_mpop",
+    "top5_crew_nblockbuster",
+    "top5_crew_nprofit",
+    "n_experienced_crew",
+
+    "has_director",
+    "director_nmovies",
+    "director_pop",
+    "director_wavg_mrating",
+    "director_avg_mpop",
+    "director_recent_mpop",
+    "director_nblockbuster",
+    "director_nprofit",
+    "director_career_span",
+]
+```
+
+```{python}
+#| label: tbl-xgboost_ablation
+#| tbl-cap: "CV performance of XGBoost for rating and log-revenue prediction by predictor category."
+#| tbl-align: center
+
+from sklearn.base import clone
+from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
+import numpy as np
+import pandas as pd
+
+
+feature_sets = {
+    "Metadata only": metadata_cols,
+    "Team statistics only": team_cols,
+    "Metadata + team statistics": metadata_cols + team_cols
+}
+
+results = []
+
+for name, cols in feature_sets.items():
+    model = clone(xgb_best_1)
+
+    model.fit(X_train[cols], y1_train)
+    y1_pred = model.predict(X_test[cols])
+
+    model = clone(xgb_best_2)
+
+    model.fit(X_train[cols], y2_train)
+    y2_pred = model.predict(X_test[cols])
+
+    results.append({
+        "Feature Set": name,
+        "R2 (Rating)": r2_score(y1_test, y1_pred),
+        "MAE (Rating)": mean_absolute_error(y1_test, y1_pred),
+        "RMSE (Rating)": np.sqrt(mean_squared_error(y1_test, y1_pred)),
+
+        "R2 (log Revenue)": r2_score(y2_test, y2_pred),
+        "MAE (log Revenue)": mean_absolute_error(y2_test, y2_pred),
+        "RMSE (log Revenue)": np.sqrt(mean_squared_error(y2_test, y2_pred)),
+    })
+
+ablation_results = pd.DataFrame(results)
+ablation_results
+
+styled_ablation = (
+    ablation_results.style
+    .set_table_styles([
+        {
+            "selector": "caption",
+            "props": [
+                ("caption-side", "bottom"),
+                ("text-align", "center"),
+                ("font-size", "0.9em"),
+                ("margin-top", "8px")
+            ]
+        }
+    ])
+    .format({
+        "R2 (Rating)": "{:.3f}",
+        "MAE (Rating)": "{:.3f}",
+        "RMSE (Rating)": "{:.3f}",
+        "R2 (log Revenue)": "{:.3f}",
+        "MAE (log Revenue)": "{:.3f}",
+        "RMSE (log Revenue)": "{:.3f}",
+    })
+)
+
+
+# Highlight Team statistics only
+styled_ablation = styled_ablation.set_properties(
+    subset=pd.IndexSlice[1, ["MAE (Rating)"]],
+    **{"background-color": "yellow"}
+)
+
+# Highlight Metadata only 
+styled_ablation = styled_ablation.set_properties(
+    subset=pd.IndexSlice[0, ["R2 (Rating)", "RMSE (Rating)", "R2 (log Revenue)", 
+                            "MAE (log Revenue)", "RMSE (log Revenue)"]],
+    **{"background-color": "yellow"}
+)
+
+styled_ablation
+
+```
+
+
+# Results
+## The Relationship of Movie Characteristics and Cast/Crew Statistics With the Movie's Performancee
+```{python}
+#| label: fig-scatter-cast-stat-log-revenue
+#| fig-cap: "Scatterplot of Top 5 Cast Weighted Average Past Movie's Rating vs Movie's Rating"
+#| fig-align: center
+#| fig-width: 9
+#| fig-height: 7
+#| out-width: "100%"
+#| echo: false
+#| warning: false
+#| message: false
+temp_df = movies_enrich.copy()
+
+# OPTIONAL: Randomly Sampling to make the graph less crowded
+n = 3000
+temp_df = temp_df.sample(n=n, random_state=42)
+
+
+revenue_filter = (temp_df["Revenue (USD)"].notna()) & (temp_df["top5_cast_wavg_mrating"] > 0)
+temp_df = temp_df[revenue_filter]
+
+temp_df["Revenue (log USD)"] = np.log(temp_df["Revenue (USD)"])
+temp_df["Budget (USD)"] = temp_df["Budget (USD)"].replace(np.nan, -1)
+
+
+fig = px.scatter(temp_df, x='Rating', y='top5_cast_wavg_mrating',
+                 color='Language', size='Revenue (log USD)', size_max=10,
+                 title="Movie's Rating vs Top 5 Cast Average Past Movie's Rating",
+                 labels={
+                    "top5_cast_wavg_mrating": "Top 5 Cast Average Past Movie's Rating",
+                    "top5_cast_avg_mpop": "Top 5 Cast Average Past Involvment Popularity",
+                    "director_wavg_mrating": "Director Past Movie's Rating"
+                 },
+                 custom_data=['Rating', 'top5_cast_wavg_mrating', 'Revenue (USD)', 'Title', "Budget (USD)", "Release Date", "Cast Size", "Crew Size", "director_wavg_mrating", "top5_cast_avg_mpop"])
+
+fig.update_traces(
+    marker=dict(opacity=0.5),
+    hovertemplate=(
+        " Title: %{customdata[3]}<br>"
+        " Release Date: %{customdata[5]|%Y-%m-%d}<br>"
+        " Budget: $%{customdata[4]:,.0f}<br>"
+        " Revenue: $%{customdata[2]:,.0f}<br>"
+        " Director Past Movie Rating: %{customdata[8]:.1f}"
+        "<extra></extra>"
+    )
+)
+
+fig.update_layout(hovermode="closest")
+fig.show()
+```
+
+
+
+## Temporal Shift in Movie's Characteristics and Performance
+
+### Trend on Genre
+```{python}
+#| fig-width: 10
+#| fig-height: 10
+#| out-width: "100%"
+#| label: fig-genre-counts-periods
+#| fig-cap: "Movie counts by genre across release periods. Bar height represents the number of movies in each genre, while color represents the average weighted rating for that genre-period."
+#| fig-align: center
+
+genres = movies.loc[:, movies.columns.str.contains(r"^genre_")].copy()
+genres = genres.rename(columns=lambda x: x.replace("genre_", ""))
+genre_cols = genres.columns.tolist()
+
+movies_with_genres = pd.concat(
+    [movies[["Release Date", "Weighted Rating"]].copy(), genres],
+    axis=1
+)
+
+movies_with_genres["Release Date"] = pd.to_datetime(
+    movies_with_genres["Release Date"],
+    errors="coerce"
+)
+
+# drop rows with missing release_date or rating
+movies_with_genres = movies_with_genres.dropna(subset=["Release Date", "Weighted Rating"])
+
+# Period Cut
+periods = {
+    "2000–2009": (2000, 2010),
+    "2010–2019": (2010, 2020),
+    "2020–2025": (2020, 2026)
+}
+
+# Fix global color mapping across all panels
+all_genre_means = []
+for start, end in periods.values():
+    temp = movies_with_genres[
+        (movies_with_genres["Release Date"].dt.year >= start) &
+        (movies_with_genres["Release Date"].dt.year < end)
+    ]
+    for genre in genre_cols:
+        mean_rating = temp.loc[temp[genre] == 1, "Weighted Rating"].mean()
+        if pd.notna(mean_rating):
+            all_genre_means.append(mean_rating)
+
+# fallback if something goes wrong and list becomes empty
+if len(all_genre_means) == 0:
+    vmin, vmax = 0, 10
+else:
+    vmin = min(all_genre_means)
+    vmax = max(all_genre_means)
+
+norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
+cmap = cm.viridis
+sm = cm.ScalarMappable(cmap=cmap, norm=norm)
+sm.set_array([])
+
+# Plotting
+fig, axes = plt.subplots(3, 1, figsize=(9, 7), sharex=True, sharey=False)
+
+for ax, (label, (start, end)) in zip(axes, periods.items()):
+    temp = movies_with_genres[
+        (movies_with_genres["Release Date"].dt.year >= start) &
+        (movies_with_genres["Release Date"].dt.year < end)
+    ]
+
+    counts = []
+    mean_ratings = []
+
+    for genre in genre_cols:
+        genre_subset = temp.loc[temp[genre] == 1, "Weighted Rating"]
+        counts.append((temp[genre] == 1).sum())
+        mean_ratings.append(genre_subset.mean())
+
+    
+    # Making the colors for plot
+    mean_ratings_for_color = [x for x in mean_ratings]
+    colors = cmap(norm(mean_ratings_for_color))
+
+    ax.bar(genre_cols, counts, color=colors, edgecolor="black", linewidth=0.4)
+
+    ax.set_title(f"Movies Released in {label}, by Genre", fontsize=12)
+    ax.grid(axis="y", linestyle="--", alpha=0.3)
+    ax.spines["top"].set_visible(False)
+    ax.set_ylabel("Number of Movies")
+    ax.spines["right"].set_visible(False)
+
+# x-axis labels only once at the bottom
+axes[-1].tick_params(axis="x", rotation=45)
+axes[-1].set_xlabel("Genre")
+
+
+
+# single shared colorbar for all subplots
+fig.subplots_adjust(right=1.1, hspace=0.25)
+cbar = fig.colorbar(sm, ax=axes, orientation="vertical", pad=0.02)
+cbar.set_label("Average weighted rating")
+
+fig.suptitle("Movie Counts by Genre Across Release Periods", fontsize=15, y=0.98)
+fig.tight_layout(rect=[0, 0, 0.93, 0.96])
+
+
+plt.show()
+
+```
+
+
+
+### Trend on Team Size and Movie's length
+```{python}
+#| fig-width: 10
+#| fig-height: 10
+#| out-width: "100%"
+#| label: fig-team-size-length-periods
+#| fig-cap: "Trend of Team Size (Cast and Crew) and Movie's Length Overtime."
+#| fig-align: center
+#| 
+movies["Release Date"] = pd.to_datetime(movies["Release Date"])
+
+temp_movies = movies_enrich.copy()
+
+# We drop most recent quarter to ensure reliability
+agg_date_movies = temp_movies.groupby("Year", as_index=True).agg(
+    cast_size_median = ("Cast Size", "median"),
+    crew_size_median = ("Crew Size", "median"),
+    length_mean = ("Length (min)", "mean")
+)[:-1]
+
+fig, axes = plt.subplots(1, 2, figsize=(20, 5))
+
+statistic_type = ["mean", "median"]
+n_ticks = 6
+
+ax = axes[0]
+
+ax.plot(agg_date_movies.index, agg_date_movies["cast_size_median"], color="blue", label= "Cast Size (Median)", linewidth=0.8)
+ax.plot(agg_date_movies.index, agg_date_movies["crew_size_median"], color="red", label= "Crew Size (Median)", linewidth=0.8)
+ax.set_xlabel("Year")
+ax.set_ylabel("Count")
+
+ymin, ymax = ax.get_ylim()
+ymin, ymax = np.floor(ymin), np.ceil(ymax)
+ticks = np.linspace(ymin, ymax, n_ticks)
+ax.set_yticks(ticks)
+ax.spines["top"].set_visible(False)
+ax.grid(axis="y", linestyle="--", alpha=0.3)
+
+# "Important Event"
+event_years = {
+    2010: "Digital Expansion",
+    2019: "COVID-19",
+    2023: "Post-COVID Recovery"
+}
+for year, label in event_years.items():
+    ax.axvline(year, linestyle="--", linewidth=1)
+    ax.text(
+        year + 0.1,
+        ymin + 0.7 * (ymax - ymin),
+        label,
+        rotation=90,
+        va="top",
+        ha="left",
+        fontsize=8
+)
+
+
+
+
+# Movie's Length
+ax_2 = axes[1]
+series = agg_date_movies["length_mean"]
+
+grand_mean = series.mean()
+grand_std = series.std()
+
+ax_2.axhspan(
+    grand_mean - grand_std,
+    grand_mean + grand_std,
+    alpha=0.15,
+    label="±1 SD",
+    zorder=0
+)
+
+ax_2.axhline(
+    grand_mean,
+    linestyle="-",
+    linewidth=1,
+    alpha=0.7,
+    label="Grand mean"
+)
+
+ax_2.plot(
+    agg_date_movies.index,
+    series,
+    color="orange",
+    label="Length (Min)",
+    linewidth=0.8
+)
+
+ax_2.set_xlabel("Year")
+ax_2.set_ylabel("Length (Min)")
+ax_2.legend(fontsize=8)
+ax_2.grid(axis="y", linestyle="--", alpha=0.3)
+
+ymin, ymax = ax_2.get_ylim()
+ymin, ymax = np.floor(ymin), np.ceil(ymax)
+
+# "Important Event"
+event_years = {
+    2010: "Digital Expansion",
+    2019: "COVID-19",
+    2023: "Post-COVID Recovery"
+}
+for year, label in event_years.items():
+    ax_2.axvline(year, linestyle="--", linewidth=1)
+    ax_2.text(
+        year + 0.1,
+        ymin + 0.7 * (ymax - ymin),
+        label,
+        rotation=90,
+        va="top",
+        ha="left",
+        fontsize=8
+)
+
+
+lines1, labels1 = ax.get_legend_handles_labels()
+ax.legend(lines1, labels1, loc="upper left")
+
+fig.suptitle("Trends in Team Size and Movie Length Over Time", fontsize=13)
+fig.subplots_adjust(wspace=0.25)
+
+axes[0].text(
+    0.5, -0.15,
+    "(a) Median cast and crew size by year",
+    transform=axes[0].transAxes,
+    ha="center",
+    va="top",
+    fontsize=9
+)
+
+axes[1].text(
+    0.5, -0.15,
+    "(b) Average movie length by year",
+    transform=axes[1].transAxes,
+    ha="center",
+    va="top",
+    fontsize=9
+)
+
+plt.show()
+```
+
+
+
+
+
+<iframe src="fig2_temporal_relationship_explorer.html"
+        width="100%"
+        height="780"
+        style="border:none;">
+</iframe> -->
