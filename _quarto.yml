@@ -1,11 +1,10 @@
 project:
   type: website
+  output-dir: docs
 
 website:
-  title: "My Website"
+  title: "JSC370-Final_Project"
   navbar:
     left:
       - text: "Home"
         href: index.qmd
-      - text: "About"
-        href: about.qmd
